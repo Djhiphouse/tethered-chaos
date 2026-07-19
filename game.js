@@ -1,144 +1,127 @@
-/* Tethered Chaos — deterministic-ish local simulation with separated input/state.
-   Online upgrade path: replace readLocalInput() with network snapshots and run
-   simulate(dt, inputs) on an authoritative server or rollback client. */
+import * as THREE from './node_modules/three/build/three.module.js';
 
-const canvas = document.querySelector('#game');
-const ctx = canvas.getContext('2d');
-const ui = Object.fromEntries(['wave','score','combo','high','status','overlay','overlay-title','overlay-text','start','lan','network','pause','announcement','announcement-title','announcement-text','copy-score','sound'].map(id=>[id,document.getElementById(id)]));
-const W=canvas.width,H=canvas.height,TAU=Math.PI*2;
+const canvas=document.querySelector('#game');
+const ui=Object.fromEntries(['round','score','cargo','time','chaos','p1-status','p2-status','toast','objective','overlay','overlay-title','overlay-text','start','lan','pause','status','network','sound'].map(id=>[id,document.getElementById(id)]));
 const held=new Set(),pressed=new Set();
-const rand=(a,b)=>a+Math.random()*(b-a),clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
-const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
-let state,raf,last=0,soundOn=true,audio;
-let mode='menu',socket=null,lanSlot=0,roomPlayers=0,sendClock=0,guestWave=1,intentionalClose=false;
-let remoteInput={x:0,y:0,action:false};
+const clamp=(n,a,b)=>Math.max(a,Math.min(b,n)),rand=(a,b)=>a+Math.random()*(b-a),distance=(a,b)=>Math.hypot(a.x-b.x,a.z-b.z);
+const ARENA={x:12.5,z:8.5},PORTAL={x:9.7,z:0},TRAPS=[{x:-1,z:-4.7},{x:2.5,z:4.5},{x:6,z:-3.2},{x:-6,z:3.5}];
+let state,raf,last=0,soundOn=true,audio,mode='menu',socket=null,lanSlot=0,roomPlayers=0,sendClock=0,intentionalClose=false,guestEvent=0;
+let remoteInput={x:0,z:0,bonk:false,yank:false};
 
-const MODIFIERS=[
-  {name:'TURBO-SCHWARM',text:'Mehr Gegner. Mehr Punkte. Weniger Ausreden.',spawn:.58,speed:1.12,score:1.35},
-  {name:'GUMMILEINE',text:'Euer Band zieht euch doppelt so stark zusammen.',pull:2.1,score:1.2},
-  {name:'GLASKANONEN',text:'Eure Impulse sind riesig. Gegner aber auch.',pulse:1.75,enemySize:1.3,score:1.4},
-  {name:'BLACKOUT',text:'Die Arena wird dunkel. Folgt der Verbindung.',dark:true,score:1.5},
-  {name:'ÜBERLADUNG',text:'Energie lädt schneller, entlädt sich aber ständig.',charge:1.8,drain:4,score:1.25},
-  {name:'RÜCKWÄRTS?',text:'Das Chaos dreht die Arena — nicht eure Tasten.',spin:true,score:1.3}
-];
+// ---------- 3D scene ----------
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.outputColorSpace=THREE.SRGBColorSpace;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x080916);scene.fog=new THREE.Fog(0x080916,18,42);
+const camera=new THREE.PerspectiveCamera(48,1,.1,100);camera.position.set(0,15,16);
+scene.add(new THREE.HemisphereLight(0x8899ff,0x130b25,2.1));
+const sun=new THREE.DirectionalLight(0xffffff,2.8);sun.position.set(-7,16,9);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);sun.shadow.camera.left=-18;sun.shadow.camera.right=18;sun.shadow.camera.top=14;sun.shadow.camera.bottom=-14;scene.add(sun);
+const cyanLight=new THREE.PointLight(0x65f7ff,16,18);cyanLight.position.set(-9,4,-5);scene.add(cyanLight);const pinkLight=new THREE.PointLight(0xff4fb3,16,18);pinkLight.position.set(9,4,5);scene.add(pinkLight);
 
-function newPlayer(id,x,color,keys){return{id,x,y:H/2,r:18,color,keys,vx:0,vy:0,hp:3,down:false,revive:0,inv:0,pulse:0,trail:[]}}
-function freshState(){return{
-  running:true,paused:false,time:0,wave:1,waveTime:0,score:0,combo:1,comboClock:0,charge:100,shake:0,flash:0,gameOver:false,modifier:null,lastModifier:-1,
-  players:[newPlayer(1,W*.34,'#65f7ff',{up:'KeyW',down:'KeyS',left:'KeyA',right:'KeyD',action:'KeyF'}),newPlayer(2,W*.66,'#ff4fb3',{up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight',action:'Enter'})],
-  enemies:[],orbs:[],particles:[],rings:[],floaters:[],spawnClock:.4,orbClock:3
-}}
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(28,20),new THREE.MeshStandardMaterial({color:0x10132a,roughness:.72,metalness:.25}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+const grid=new THREE.GridHelper(28,28,0x4d568f,0x252a4a);grid.position.y=.012;scene.add(grid);
+const wallMat=new THREE.MeshStandardMaterial({color:0x22284d,emissive:0x11152e,roughness:.45,metalness:.65});
+for(const [x,z,w,d] of [[0,-9,27,1],[0,9,27,1],[-13,0,1,17],[13,0,1,17]]){const wall=new THREE.Mesh(new THREE.BoxGeometry(w,1.1,d),wallMat);wall.position.set(x,.55,z);wall.castShadow=true;wall.receiveShadow=true;scene.add(wall)}
+const trapMeshes=TRAPS.map((trap,index)=>{const group=new THREE.Group();const base=new THREE.Mesh(new THREE.CylinderGeometry(1.05,1.05,.12,8),new THREE.MeshStandardMaterial({color:0x3a1024,emissive:0xff174f,emissiveIntensity:1.6,metalness:.7}));base.position.y=.08;group.add(base);for(let i=0;i<4;i++){const bar=new THREE.Mesh(new THREE.BoxGeometry(.16,.08,1.65),new THREE.MeshBasicMaterial({color:0xff4c73}));bar.position.y=.16;bar.rotation.y=i*Math.PI/4;group.add(bar)}group.position.set(trap.x,0,trap.z);group.userData.offset=index;scene.add(group);return group});
+const portal=new THREE.Group();const portalRing=new THREE.Mesh(new THREE.TorusGeometry(1.75,.18,12,48),new THREE.MeshStandardMaterial({color:0x47506d,emissive:0x17213c,emissiveIntensity:1.5,metalness:.8,roughness:.25}));portalRing.rotation.x=Math.PI/2;portalRing.position.y=.18;portal.add(portalRing);const portalBeam=new THREE.Mesh(new THREE.CylinderGeometry(1.45,1.45,.05,48),new THREE.MeshBasicMaterial({color:0x65f7ff,transparent:true,opacity:.14,side:THREE.DoubleSide}));portalBeam.position.y=.06;portal.add(portalBeam);portal.position.set(PORTAL.x,0,PORTAL.z);scene.add(portal);
+const starsGeo=new THREE.BufferGeometry();const stars=[];for(let i=0;i<260;i++)stars.push(rand(-30,30),rand(4,22),rand(-30,12));starsGeo.setAttribute('position',new THREE.Float32BufferAttribute(stars,3));scene.add(new THREE.Points(starsGeo,new THREE.PointsMaterial({color:0x9aa7ff,size:.06,transparent:true,opacity:.55})));
 
-function readLocalInput(){return state.players.map(p=>({x:(held.has(p.keys.right)?1:0)-(held.has(p.keys.left)?1:0),y:(held.has(p.keys.down)?1:0)-(held.has(p.keys.up)?1:0),action:pressed.has(p.keys.action)}))}
-function readOwnInput(){return{x:(held.has('KeyD')||held.has('ArrowRight')?1:0)-(held.has('KeyA')||held.has('ArrowLeft')?1:0),y:(held.has('KeyS')||held.has('ArrowDown')?1:0)-(held.has('KeyW')||held.has('ArrowUp')?1:0),action:pressed.has('KeyF')||pressed.has('Enter')||pressed.has('Space')}}
-function beep(freq=220,duration=.06,type='sine',volume=.04){if(!soundOn)return;audio ||= new AudioContext();const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.value=freq;g.gain.setValueAtTime(volume,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+duration);o.connect(g).connect(audio.destination);o.start();o.stop(audio.currentTime+duration)}
-function burst(x,y,color,count=16,power=230){for(let i=0;i<count;i++){const a=rand(0,TAU),s=rand(30,power);state.particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:rand(.3,.9),max:1,size:rand(2,7),color})}}
-function ring(x,y,color,max=130){state.rings.push({x,y,r:8,max,life:1,color})}
-function floater(x,y,text,color='#fff',size=18){state.floaters.push({x,y,text,color,size,life:1})}
-function circleHit(a,b){return dist(a,b)<a.r+b.r}
-function pointLineDistance(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy;if(!l2)return dist(p,a);const t=clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/l2,0,1);return Math.hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy))}
+const playerMeshes=new Map(),enemyMeshes=new Map(),coreMeshes=new Map(),curseMeshes=new Map();
+const tetherGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);const tether=new THREE.Line(tetherGeo,new THREE.LineBasicMaterial({color:0xc7a3ff,transparent:true,opacity:.92}));scene.add(tether);
+const drone=new THREE.Mesh(new THREE.OctahedronGeometry(.32),new THREE.MeshStandardMaterial({color:0xffffff,emissive:0x9c6cff,emissiveIntensity:2.5,metalness:.8,roughness:.15}));drone.castShadow=true;scene.add(drone);
 
-function beginRound(){cancelAnimationFrame(raf);state=freshState();sendClock=0;remoteInput={x:0,y:0,action:false};ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui['copy-score'].disabled=true;ui.status.textContent=mode==='local'?'DIE VERBINDUNG HÄLT':`LAN · SPIELER ${lanSlot}`;last=performance.now();beep(180,.12,'sawtooth',.06);raf=requestAnimationFrame(loop)}
-function startLocal(){disconnectLan(true);mode='local';ui.network.classList.add('hidden');ui.lan.disabled=false;ui.lan.textContent='ÜBER WLAN SPIELEN';beginRound()}
-function beginGuestRound(){cancelAnimationFrame(raf);state=freshState();state.running=true;guestWave=1;sendClock=0;ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui['copy-score'].disabled=true;ui.status.textContent='LAN · SPIELER 2';last=performance.now();raf=requestAnimationFrame(guestLoop)}
-
-function netSend(message){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message))}
-function setLanMessage(title,text){ui['overlay-title'].textContent=title;ui['overlay-text'].innerHTML=text;ui.overlay.classList.remove('hidden')}
-function updateRoom(){
-  if(mode==='lan-host'&&!state?.running&&!state?.gameOver){const ready=roomPlayers===2;setLanMessage(ready?'Spieler 2 ist verbunden.':'Warte auf Spieler 2 …',ready?'Ihr seid im selben Raum. Starte, wenn ihr beide bereit seid.':'Dein Freund öffnet dieselbe WLAN-Adresse, die im Terminal angezeigt wird.');ui.start.textContent=ready?'LAN-RUNDE STARTEN':'WARTE AUF FREUND';ui.start.disabled=!ready}
-  if(mode==='lan-guest'&&!state?.running&&!state?.gameOver){setLanMessage('Verbunden als Spieler 2.','Spieler 1 startet die Runde. Auf deinem Laptop funktionieren WASD oder die Pfeiltasten; Impuls mit F, Enter oder Leertaste.');ui.start.textContent='SPIELER 1 STARTET';ui.start.disabled=true}
+function mat(color,emissive=.18){return new THREE.MeshStandardMaterial({color,emissive,emissiveIntensity:emissive,roughness:.42,metalness:.35})}
+function createCourier(color){
+  const root=new THREE.Group(),bodyMat=mat(color,.42),dark=mat(0x15172a,.05),white=mat(0xf7fbff,.15);
+  const torso=new THREE.Mesh(new THREE.CapsuleGeometry(.48,.72,5,10),bodyMat);torso.position.y=1.28;torso.castShadow=true;root.add(torso);
+  const head=new THREE.Mesh(new THREE.BoxGeometry(.92,.66,.78,2,2,2),white);head.position.set(0,2.05,0);head.castShadow=true;root.add(head);
+  for(const x of [-.24,.24]){const eye=new THREE.Mesh(new THREE.SphereGeometry(.08,10,8),new THREE.MeshBasicMaterial({color}));eye.position.set(x,2.1,.405);root.add(eye)}
+  const backpack=new THREE.Mesh(new THREE.BoxGeometry(.78,.72,.25),dark);backpack.position.set(0,1.35,-.46);root.add(backpack);
+  const limbs={arms:[],legs:[]};for(const x of [-.56,.56]){const arm=new THREE.Mesh(new THREE.CapsuleGeometry(.11,.55,3,7),bodyMat);arm.position.set(x,1.35,0);arm.castShadow=true;root.add(arm);limbs.arms.push(arm)}for(const x of [-.25,.25]){const leg=new THREE.Mesh(new THREE.CapsuleGeometry(.14,.5,3,7),dark);leg.position.set(x,.48,0);leg.castShadow=true;root.add(leg);limbs.legs.push(leg)}
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(.72,.045,8,32),new THREE.MeshBasicMaterial({color,transparent:true,opacity:.75}));ring.rotation.x=Math.PI/2;ring.position.y=.06;root.add(ring);root.userData=limbs;scene.add(root);return root
 }
+function createEnemy(type){const root=new THREE.Group(),color=type==='brute'?0xffb84c:0xff365f;const body=new THREE.Mesh(new THREE.IcosahedronGeometry(type==='brute'?.72:.48,1),mat(color,.7));body.position.y=type==='brute'?.78:.58;body.castShadow=true;root.add(body);for(const x of [-.16,.16]){const eye=new THREE.Mesh(new THREE.SphereGeometry(.055,8,6),new THREE.MeshBasicMaterial({color:0xffffff}));eye.position.set(x,body.position.y+.1,.43);root.add(eye)}scene.add(root);return root}
+function createCore(){const mesh=new THREE.Mesh(new THREE.DodecahedronGeometry(.36),new THREE.MeshStandardMaterial({color:0xffe66d,emissive:0xffb300,emissiveIntensity:2.8,metalness:.65,roughness:.18}));mesh.castShadow=true;scene.add(mesh);return mesh}
+function createCurse(){const group=new THREE.Group(),box=new THREE.Mesh(new THREE.BoxGeometry(.7,.7,.7),new THREE.MeshStandardMaterial({color:0xa44cff,emissive:0x7c22ff,emissiveIntensity:2.1,metalness:.55,roughness:.3}));box.castShadow=true;group.add(box);const ring=new THREE.Mesh(new THREE.TorusGeometry(.55,.055,8,24),new THREE.MeshBasicMaterial({color:0xff7cf5}));ring.rotation.x=Math.PI/2;group.add(ring);scene.add(group);return group}
+function resize(){const box=canvas.parentElement.getBoundingClientRect(),w=Math.max(320,box.width),h=Math.max(260,box.height);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix()}addEventListener('resize',resize);resize();
+
+// ---------- game state and simulation ----------
+function newPlayer(id,x,z,color){return{id,x,z,vx:0,vz:0,color,hp:3,down:false,revive:0,inv:3,stun:0,invert:0,bonkCd:0,yankCd:0,trapCd:0}}
+function freshState(){const s={running:true,paused:false,gameOver:false,time:0,timeLeft:75,round:1,score:0,cargo:0,chaos:0,portalProgress:0,spawnClock:3.5,coreClock:0,curseClock:9,nextId:1,eventId:0,event:null,players:[newPlayer(1,-7,-1,'#65f7ff'),newPlayer(2,-7,1,'#ff4fb3')],enemies:[],cores:[],curses:[]};for(let i=0;i<5;i++)s.cores.push({id:s.nextId++,x:rand(-8,7),z:rand(-6,6),spin:rand(0,6)});return s}
+function emptyInput(){return{x:0,z:0,bonk:false,yank:false}}
+function readLocalInputs(){return[
+  {x:(held.has('KeyD')?1:0)-(held.has('KeyA')?1:0),z:(held.has('KeyS')?1:0)-(held.has('KeyW')?1:0),bonk:pressed.has('KeyQ'),yank:pressed.has('KeyE')},
+  {x:(held.has('ArrowRight')?1:0)-(held.has('ArrowLeft')?1:0),z:(held.has('ArrowDown')?1:0)-(held.has('ArrowUp')?1:0),bonk:pressed.has('Slash'),yank:pressed.has('ShiftRight')||pressed.has('ShiftLeft')}
+]}
+function readOwnInput(){return{x:(held.has('KeyD')||held.has('ArrowRight')?1:0)-(held.has('KeyA')||held.has('ArrowLeft')?1:0),z:(held.has('KeyS')||held.has('ArrowDown')?1:0)-(held.has('KeyW')||held.has('ArrowUp')?1:0),bonk:pressed.has('KeyQ')||pressed.has('Slash'),yank:pressed.has('KeyE')||pressed.has('ShiftRight')||pressed.has('ShiftLeft')}}
+function beep(freq=220,duration=.07,type='sine',volume=.035){if(!soundOn)return;audio||=new AudioContext();const oscillator=audio.createOscillator(),gain=audio.createGain();oscillator.type=type;oscillator.frequency.value=freq;gain.gain.setValueAtTime(volume,audio.currentTime);gain.gain.exponentialRampToValueAtTime(.001,audio.currentTime+duration);oscillator.connect(gain).connect(audio.destination);oscillator.start();oscillator.stop(audio.currentTime+duration)}
+function showToast(text,color='#ffe66d'){ui.toast.textContent=text;ui.toast.style.borderColor=color;ui.toast.classList.remove('hidden');ui.toast.style.animation='none';void ui.toast.offsetWidth;ui.toast.style.animation='toast 1.7s both'}
+function emitEvent(text,color='#ffe66d'){state.event={id:++state.eventId,text,color};showToast(text,color)}
+function spawnEnemy(){const side=Math.floor(rand(0,4)),brute=Math.random()>.82;state.enemies.push({id:state.nextId++,x:side===1?ARENA.x:side===3?-ARENA.x:rand(-ARENA.x,ARENA.x),z:side===0?-ARENA.z:side===2?ARENA.z:rand(-ARENA.z,ARENA.z),vx:0,vz:0,hp:brute?3:1,type:brute?'brute':'glitch',stun:0,hit:0,phase:rand(0,6),dead:false})}
+function spawnCore(){state.cores.push({id:state.nextId++,x:rand(-8,7.5),z:rand(-6.3,6.3),spin:rand(0,6)})}
+function spawnCurse(){state.curses.push({id:state.nextId++,x:rand(-7,7),z:rand(-5.5,5.5),spin:rand(0,6),life:14})}
+function knock(source,target,power){const d=distance(source,target)||1;target.vx+=(target.x-source.x)/d*power;target.vz+=(target.z-source.z)/d*power}
+function bonk(player,mate){
+  if(player.bonkCd>0||player.down)return;player.bonkCd=1.05;let did=false;
+  if(distance(player,mate)<2.45&&!mate.down){knock(player,mate,9);mate.stun=.32;state.chaos++;emitEvent(`BONK! P${player.id} → P${mate.id}`,player.color);beep(95,.1,'square',.06);did=true}
+  for(const enemy of state.enemies)if(!enemy.dead&&distance(player,enemy)<2.35){knock(player,enemy,11);enemy.hp--;enemy.stun=.55;enemy.hit=.15;if(enemy.hp<=0){enemy.dead=true;state.score+=180}did=true}
+  if(!did)beep(150,.04,'square',.018)
+}
+function yank(player,mate){if(player.yankCd>0||player.down||mate.down)return;player.yankCd=2.5;const d=distance(player,mate)||1;mate.vx+=(player.x-mate.x)/d*11;mate.vz+=(player.z-mate.z)/d*11;mate.stun=.18;state.chaos++;emitEvent(`YOINK! P${player.id} zieht P${mate.id}`,player.color);beep(360,.12,'sawtooth',.045)}
+function hurt(player,source){if(player.inv>0||player.down)return;player.hp--;player.inv=1.2;player.stun=.35;knock(source,player,7);beep(70,.16,'sawtooth',.065);if(player.hp<=0){player.down=true;player.revive=0;emitEvent(`P${player.id} LIEGT! RETTET IHN`,player.color)}}
+function updatePlayer(player,input,mate,dt){
+  for(const key of ['inv','stun','invert','bonkCd','yankCd','trapCd'])player[key]=Math.max(0,player[key]-dt);
+  if(player.down){player.vx*=.9;player.vz*=.9;player.x+=player.vx*dt;player.z+=player.vz*dt;return}
+  let ix=input.x,iz=input.z;if(player.invert>0){ix=-ix;iz=-iz}const length=Math.hypot(ix,iz)||1,target=player.stun>0?0:5.8;player.vx+=(ix/length*target-player.vx)*Math.min(1,dt*11);player.vz+=(iz/length*target-player.vz)*Math.min(1,dt*11);player.x=clamp(player.x+player.vx*dt,-ARENA.x+1,ARENA.x-1);player.z=clamp(player.z+player.vz*dt,-ARENA.z+1,ARENA.z-1);
+  if(input.bonk)bonk(player,mate);if(input.yank)yank(player,mate);
+  for(const trap of TRAPS)if(player.trapCd<=0&&Math.hypot(player.x-trap.x,player.z-trap.z)<1.12){player.trapCd=1.4;player.stun=.55;player.vx=rand(-9,9);player.vz=rand(-9,9);state.score=Math.max(0,state.score-50);emitEvent(`ZAP! P${player.id} auf der Falle`,'#ff5577');beep(55,.2,'sawtooth',.07)}
+}
+function simulate(dt,inputs){
+  state.time+=dt;state.timeLeft=Math.max(0,state.timeLeft-dt);const [a,b]=state.players;updatePlayer(a,inputs[0],b,dt);updatePlayer(b,inputs[1],a,dt);
+  const tetherDistance=distance(a,b);if(tetherDistance>6.8){const dx=(b.x-a.x)/tetherDistance,dz=(b.z-a.z)/tetherDistance,force=(tetherDistance-6.8)*5;if(!a.down){a.x+=dx*force*dt;a.z+=dz*force*dt}if(!b.down){b.x-=dx*force*dt;b.z-=dz*force*dt}if(tetherDistance>9)state.score=Math.max(0,state.score-dt*20)}
+  for(const downed of state.players.filter(p=>p.down)){const mate=state.players.find(p=>p!==downed);if(!mate.down&&distance(downed,mate)<1.7){downed.revive+=dt;if(downed.revive>=1.8){downed.down=false;downed.hp=2;downed.inv=2;downed.revive=0;state.score+=350;emitEvent(`P${downed.id} IST WIEDER DA!`,downed.color)}}else downed.revive=Math.max(0,downed.revive-dt*.4)}
+  if(a.down&&b.down)return endGame('BEIDE KURIERE SIND AUSGEFALLEN');
+  for(const core of state.cores)for(const p of state.players)if(!p.down&&Math.hypot(p.x-core.x,p.z-core.z)<.9){core.taken=true;state.cargo++;state.score+=120;emitEvent(`KERN ${state.cargo}/5 GESICHERT`,'#ffe66d');beep(720,.08,'sine',.04);break}state.cores=state.cores.filter(c=>!c.taken);
+  for(const curse of state.curses){curse.life-=dt;for(const p of state.players){const mate=state.players.find(other=>other!==p);if(!p.down&&Math.hypot(p.x-curse.x,p.z-curse.z)<.9){curse.taken=true;mate.invert=4;state.score+=200;state.chaos+=2;emitEvent(`FLUCH! P${mate.id} STEUERT RÜCKWÄRTS`,mate.color);beep(180,.25,'square',.055);break}}}state.curses=state.curses.filter(c=>!c.taken&&c.life>0);
+  if(state.cargo>=5){const bothIn=state.players.every(p=>!p.down&&Math.hypot(p.x-PORTAL.x,p.z-PORTAL.z)<2);state.portalProgress=bothIn?state.portalProgress+dt:Math.max(0,state.portalProgress-dt*.7);if(state.portalProgress>=1.6){state.round++;state.score+=1200+Math.round(state.timeLeft*10);state.timeLeft=Math.min(99,state.timeLeft+18);state.cargo=0;state.portalProgress=0;state.enemies=[];for(let i=0;i<5;i++)spawnCore();emitEvent(`LIEFERUNG ${state.round-1} GESCHAFFT!`,'#b8ff5c');beep(880,.3,'sine',.065)}}else state.portalProgress=0;
+  state.spawnClock-=dt;if(state.spawnClock<=0){spawnEnemy();state.spawnClock=Math.max(.55,2.2-state.round*.15)}state.curseClock-=dt;if(state.curseClock<=0){spawnCurse();state.curseClock=rand(10,15)}if(state.cores.length<5-state.cargo){state.coreClock-=dt;if(state.coreClock<=0){spawnCore();state.coreClock=2}}
+  const living=state.players.filter(p=>!p.down);for(const enemy of state.enemies){enemy.stun=Math.max(0,enemy.stun-dt);enemy.hit=Math.max(0,enemy.hit-dt);enemy.phase+=dt*4;if(enemy.dead||!living.length)continue;const target=living.reduce((best,p)=>distance(enemy,p)<distance(enemy,best)?p:best,living[0]),d=distance(enemy,target)||1,speed=(enemy.type==='brute'?2.2:3.3)*(enemy.stun>0?0:1);enemy.vx+=(target.x-enemy.x)/d*speed*dt*5;enemy.vz+=(target.z-enemy.z)/d*speed*dt*5;enemy.vx*=.9;enemy.vz*=.9;enemy.x+=enemy.vx*dt;enemy.z+=enemy.vz*dt;if(distance(enemy,target)<(enemy.type==='brute'?1.15:.9))hurt(target,enemy)}state.enemies=state.enemies.filter(e=>!e.dead);
+  if(state.timeLeft<=0)endGame('SCHICHT VORBEI');updateUi()
+}
+
+// ---------- visual sync ----------
+function removeMissing(map,items){const ids=new Set(items.map(item=>item.id));for(const [id,mesh] of map)if(!ids.has(id)){scene.remove(mesh);map.delete(id)}}
+function syncMeshes(){
+  const elapsed=state.time||0;for(const p of state.players){let mesh=playerMeshes.get(p.id);if(!mesh){mesh=createCourier(p.id===1?0x65f7ff:0xff4fb3);playerMeshes.set(p.id,mesh)}mesh.position.set(p.x,p.down?.18:0,p.z);const speed=Math.hypot(p.vx,p.vz);if(speed>.12)mesh.rotation.y=Math.atan2(p.vx,p.vz);const swing=Math.sin(elapsed*10+p.id)*Math.min(.7,speed*.11);mesh.userData.arms[0].rotation.x=swing;mesh.userData.arms[1].rotation.x=-swing;mesh.userData.legs[0].rotation.x=-swing;mesh.userData.legs[1].rotation.x=swing;mesh.rotation.z=p.stun>0?Math.sin(elapsed*28)*.16:0;mesh.visible=!(p.inv>0&&Math.floor(p.inv*12)%2===0)}
+  for(const e of state.enemies){let mesh=enemyMeshes.get(e.id);if(!mesh){mesh=createEnemy(e.type);enemyMeshes.set(e.id,mesh)}mesh.position.set(e.x,Math.sin(elapsed*5+e.phase)*.08,e.z);mesh.rotation.y=Math.atan2(e.vx,e.vz);mesh.rotation.z=e.hit>0?rand(-.2,.2):0}removeMissing(enemyMeshes,state.enemies);
+  for(const core of state.cores){let mesh=coreMeshes.get(core.id);if(!mesh){mesh=createCore();coreMeshes.set(core.id,mesh)}mesh.position.set(core.x,.75+Math.sin(elapsed*3+core.spin)*.18,core.z);mesh.rotation.y=elapsed*2+core.spin;mesh.rotation.x=elapsed*.8}removeMissing(coreMeshes,state.cores);
+  for(const curse of state.curses){let mesh=curseMeshes.get(curse.id);if(!mesh){mesh=createCurse();curseMeshes.set(curse.id,mesh)}mesh.position.set(curse.x,.62+Math.sin(elapsed*4+curse.spin)*.12,curse.z);mesh.rotation.y=elapsed*1.8+curse.spin}removeMissing(curseMeshes,state.curses);
+  const [a,b]=state.players,positions=tether.geometry.attributes.position.array;positions[0]=a.x;positions[1]=1.25;positions[2]=a.z;positions[3]=b.x;positions[4]=1.25;positions[5]=b.z;tether.geometry.attributes.position.needsUpdate=true;drone.position.set((a.x+b.x)/2,1.8+Math.sin(elapsed*4)*.2,(a.z+b.z)/2);drone.rotation.y=elapsed*2;drone.rotation.x=elapsed;
+  const ready=state.cargo>=5;portalRing.material.color.setHex(ready?0x65f7ff:0x47506d);portalRing.material.emissive.setHex(ready?0x20c4dd:0x17213c);portalBeam.material.opacity=ready?.22+.2*clamp(state.portalProgress/1.6,0,1):.07;portal.rotation.y=elapsed*.35;trapMeshes.forEach(mesh=>mesh.rotation.y=elapsed*.25+mesh.userData.offset);
+}
+function render(){syncMeshes();const [a,b]=state.players,midX=(a.x+b.x)/2,midZ=(a.z+b.z)/2,target=new THREE.Vector3(midX,0,midZ);camera.position.lerp(new THREE.Vector3(midX,13.5,midZ+14.5),.06);camera.lookAt(target);renderer.render(scene,camera)}
+function updateUi(){ui.round.textContent=String(state.round).padStart(2,'0');ui.score.textContent=Math.floor(state.score).toString().padStart(6,'0');ui.cargo.textContent=state.cargo;ui.time.textContent=state.timeLeft.toFixed(1);ui.chaos.textContent=state.chaos;state.players.forEach(p=>ui[`p${p.id}-status`].textContent=p.down?`GEFALLEN · ${Math.round(p.revive/1.8*100)}%`:`${'♥ '.repeat(p.hp)}${p.invert>0?'· FLUCH!':''}`);ui.objective.textContent=state.cargo>=5?`BEIDE INS PORTAL · ${Math.round(state.portalProgress/1.6*100)}%`:'SAMMELT 5 ENERGIEKERNE'}
+
+// ---------- local and LAN session ----------
+function beginRound(){cancelAnimationFrame(raf);state=freshState();sendClock=0;remoteInput=emptyInput();guestEvent=0;ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui.start.disabled=false;ui.status.textContent=mode==='local'?'LOKALE SCHICHT LÄUFT':`LAN · SPIELER ${lanSlot}`;last=performance.now();beep(220,.12,'sawtooth',.05);raf=requestAnimationFrame(hostLoop)}
+function beginGuestRound(){cancelAnimationFrame(raf);state=freshState();guestEvent=0;sendClock=0;ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui.status.textContent='LAN · SPIELER 2';last=performance.now();raf=requestAnimationFrame(guestLoop)}
+function startLocal(){disconnectLan(true);mode='local';ui.network.classList.add('hidden');ui.lan.disabled=false;ui.lan.textContent='ÜBER WLAN SPIELEN';beginRound()}
+function showGameOver(){cancelAnimationFrame(raf);ui['overlay-title'].textContent=state.endReason||'SCHICHT VORBEI';ui['overlay-text'].innerHTML=`Team-Score: <strong>${Math.floor(state.score).toString().padStart(6,'0')}</strong> · Lieferungen: <strong>${state.round-1}</strong> · Chaos-Aktionen: <strong>${state.chaos}</strong><br>Wer von euch war wirklich das Problem?`;ui.start.textContent=mode==='lan-guest'?'SPIELER 1 STARTET':'NOCH EINE SCHICHT';ui.start.disabled=mode==='lan-guest'||(mode==='lan-host'&&roomPlayers<2);ui.overlay.classList.remove('hidden');ui.status.textContent='SCHICHT BEENDET'}
+function endGame(reason){if(!state.running)return;state.running=false;state.gameOver=true;state.endReason=reason;if(mode==='lan-host')netSend({type:'gameover',state});showGameOver();beep(60,.45,'sawtooth',.07)}
+function hostLoop(now){if(!state?.running)return;const dt=Math.min((now-last)/1000,.033);last=now,sendClock+=dt;const inputs=mode==='lan-host'?[readOwnInput(),remoteInput]:readLocalInputs();if(!state.paused)simulate(dt,inputs);render();if(mode==='lan-host'){remoteInput.bonk=false;remoteInput.yank=false;if(sendClock>=1/28){sendClock=0;netSend({type:'snapshot',state})}}pressed.clear();raf=requestAnimationFrame(hostLoop)}
+function guestLoop(now){if(mode!=='lan-guest')return;const dt=Math.min((now-last)/1000,.05);last=now,sendClock+=dt;if(state?.running){render();updateUi()}if(sendClock>=1/28){sendClock=0;netSend({type:'input',input:readOwnInput()});pressed.clear()}raf=requestAnimationFrame(guestLoop)}
+function netSend(message){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message))}
+function setOverlay(title,text){ui['overlay-title'].textContent=title;ui['overlay-text'].innerHTML=text;ui.overlay.classList.remove('hidden')}
+function updateRoom(){if(mode==='lan-host'&&!state?.running&&!state?.gameOver){const ready=roomPlayers===2;setOverlay(ready?'Dein Partner ist da.':'Warte auf den zweiten Kurier …',ready?'Startet eure gemeinsame Schicht – und versucht, euch nicht sofort gegenseitig auf eine Falle zu schlagen.':'Dein Freund öffnet die WLAN-Adresse aus dem Terminal und klickt ebenfalls auf „Über WLAN spielen“.');ui.start.textContent=ready?'LAN-SCHICHT STARTEN':'WARTE AUF PARTNER';ui.start.disabled=!ready}if(mode==='lan-guest'&&!state?.running&&!state?.gameOver){setOverlay('Du bist Kurier 2.','Kurier 1 startet die Runde. Auf deinem Laptop funktionieren WASD oder die Pfeiltasten; Bonk mit Q oder /, Yank mit E oder Shift.');ui.start.textContent='KURIER 1 STARTET';ui.start.disabled=true}}
 function connectLan(){
-  if(location.protocol==='file:'){setLanMessage('LAN braucht den Spielserver.','Starte im Projektordner <strong>npm install</strong> und danach <strong>npm start</strong>. Öffne anschließend die angezeigte WLAN-Adresse.');return}
-  if(socket&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(socket.readyState))return;
-  intentionalClose=false;mode='lan-connecting';ui.start.disabled=true;ui.lan.disabled=true;ui.lan.textContent='VERBINDE …';setLanMessage('LAN-Verbindung wird aufgebaut …','Der erste verbundene Laptop wird Spieler 1, der zweite wird Spieler 2.');
-  const protocol=location.protocol==='https:'?'wss:':'ws:';socket=new WebSocket(`${protocol}//${location.host}`);
-  socket.addEventListener('message',event=>{
-    let message;try{message=JSON.parse(event.data)}catch{return}
-    if(message.type==='assign'){
-      lanSlot=message.slot;ui.network.classList.remove('hidden','bad');ui.network.textContent=lanSlot?`● LAN · P${lanSlot}`:'● ZUSCHAUER';ui.lan.textContent='LAN VERBUNDEN';
-      if(lanSlot===1)mode='lan-host';else if(lanSlot===2)mode='lan-guest';else{mode='lan-spectator';setLanMessage('Dieser Raum ist voll.','Zwei Spieler sind bereits verbunden. Schließe einen der anderen Tabs und lade diese Seite neu.')}updateRoom()
-    }
-    if(message.type==='room'){roomPlayers=message.players;updateRoom()}
-    if(message.type==='input'&&mode==='lan-host'){const i=message.input||{};remoteInput={x:Math.max(-1,Math.min(1,Number(i.x)||0)),y:Math.max(-1,Math.min(1,Number(i.y)||0)),action:Boolean(i.action)}}
-    if(message.type==='start'){if(mode==='lan-host')beginRound();if(mode==='lan-guest')beginGuestRound()}
-    if(message.type==='snapshot'&&mode==='lan-guest'){
-      state=message.state;if(state.wave>guestWave&&state.modifier){guestWave=state.wave;ui['announcement-title'].textContent=state.modifier.name;ui['announcement-text'].textContent=state.modifier.text;ui.announcement.classList.remove('hidden');ui.announcement.style.animation='none';void ui.announcement.offsetWidth;ui.announcement.style.animation='cardIn 2.8s both'}
-      ui.pause.classList.toggle('hidden',!state.paused);updateUi()
-    }
-    if(message.type==='gameover'&&mode==='lan-guest'){state=message.state;showGameOver()}
-    if(message.type==='host-left'&&mode==='lan-guest'){cancelAnimationFrame(raf);state.running=false;setLanMessage('Spieler 1 hat den Raum verlassen.','Lade beide Seiten neu, um einen neuen LAN-Raum zu starten.');ui.start.disabled=true;ui.network.classList.add('bad')}
-  });
-  socket.addEventListener('close',()=>{if(intentionalClose)return;cancelAnimationFrame(raf);ui.network.classList.remove('hidden');ui.network.classList.add('bad');ui.network.textContent='● LAN GETRENNT';setLanMessage('LAN-Verbindung getrennt.','Prüfe, ob der Server auf Laptop 1 noch läuft, und lade die Seite neu.');ui.start.disabled=true});
-  socket.addEventListener('error',()=>{ui.network.classList.remove('hidden');ui.network.classList.add('bad');ui.network.textContent='● LAN-FEHLER'});
+  if(location.protocol==='file:'){setOverlay('LAN braucht den Server.','Führe im Projektordner <strong>npm install</strong> und <strong>npm start</strong> aus.');return}if(socket&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(socket.readyState))return;
+  intentionalClose=false;mode='lan-connecting';ui.start.disabled=true;ui.lan.disabled=true;ui.lan.textContent='VERBINDE …';setOverlay('LAN-Verbindung …','Der erste Laptop wird Kurier 1, der zweite Kurier 2.');socket=new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}`);
+  socket.addEventListener('message',event=>{let message;try{message=JSON.parse(event.data)}catch{return}if(message.type==='assign'){lanSlot=message.slot;ui.network.classList.remove('hidden','bad');ui.network.textContent=lanSlot?`● LAN · P${lanSlot}`:'● ZUSCHAUER';ui.lan.textContent='LAN VERBUNDEN';mode=lanSlot===1?'lan-host':lanSlot===2?'lan-guest':'lan-spectator';if(!lanSlot)setOverlay('Raum voll.','Zwei Kuriere sind bereits verbunden.');updateRoom()}if(message.type==='room'){roomPlayers=message.players;updateRoom()}if(message.type==='input'&&mode==='lan-host'){const i=message.input||{};remoteInput={x:clamp(Number(i.x)||0,-1,1),z:clamp(Number(i.z)||0,-1,1),bonk:Boolean(i.bonk),yank:Boolean(i.yank)}}if(message.type==='start'){if(mode==='lan-host')beginRound();if(mode==='lan-guest')beginGuestRound()}if(message.type==='snapshot'&&mode==='lan-guest'){state=message.state;if(state.event&&state.event.id>guestEvent){guestEvent=state.event.id;showToast(state.event.text,state.event.color)}ui.pause.classList.toggle('hidden',!state.paused)}if(message.type==='gameover'&&mode==='lan-guest'){state=message.state;showGameOver()}if(message.type==='host-left'&&mode==='lan-guest'){cancelAnimationFrame(raf);state.running=false;setOverlay('Kurier 1 ist weg.','Lade beide Seiten neu, um einen neuen Raum zu starten.');ui.network.classList.add('bad')}});
+  socket.addEventListener('close',()=>{if(intentionalClose)return;cancelAnimationFrame(raf);ui.network.classList.remove('hidden');ui.network.classList.add('bad');ui.network.textContent='● LAN GETRENNT';setOverlay('Verbindung getrennt.','Prüfe, ob der Server auf Laptop 1 noch läuft, und lade neu.');ui.start.disabled=true});socket.addEventListener('error',()=>{ui.network.classList.remove('hidden');ui.network.classList.add('bad');ui.network.textContent='● LAN-FEHLER'})
 }
 function disconnectLan(silent=false){if(socket){intentionalClose=silent;socket.close();socket=null}lanSlot=0;roomPlayers=0}
-function handleStart(){if(mode==='lan-host'){if(roomPlayers===2)netSend({type:'start'});return}if(mode==='lan-guest'||mode==='lan-connecting'||mode==='lan-spectator')return;startLocal()}
-function spawnEnemy(){const edge=Math.floor(rand(0,4)),m=35;let x=edge===1?W+m:edge===3?-m:rand(0,W),y=edge===0?-m:edge===2?H+m:rand(0,H);const roll=Math.random();state.enemies.push({x,y,r:roll>.87?25:roll>.62?18:13,hp:roll>.87?3:roll>.62?2:1,speed:rand(72,118),type:roll>.87?'tank':roll>.62?'dash':'basic',color:roll>.87?'#ffe66d':'#ff446d',hit:0,phase:rand(0,TAU),dead:false})}
-function spawnOrb(){state.orbs.push({x:rand(70,W-70),y:rand(70,H-70),r:10,life:10,phase:rand(0,TAU)})}
-function applyModifier(){let next=Math.floor(Math.random()*MODIFIERS.length);if(next===state.lastModifier)next=(next+1)%MODIFIERS.length;state.lastModifier=next;state.modifier={...MODIFIERS[next]};ui['announcement-title'].textContent=state.modifier.name;ui['announcement-text'].textContent=state.modifier.text;ui.announcement.classList.remove('hidden');void ui.announcement.offsetWidth;ui.announcement.style.animation='none';void ui.announcement.offsetWidth;ui.announcement.style.animation='cardIn 2.8s both';beep(110,.25,'square',.05)}
+function handleStart(){if(mode==='lan-host'){if(roomPlayers===2)netSend({type:'start'});return}if(mode.startsWith('lan-'))return;startLocal()}
 
-function updatePlayer(p,input,dt){
-  if(p.inv>0)p.inv-=dt;if(p.pulse>0)p.pulse-=dt;
-  if(p.down){p.vx*=.86;p.vy*=.86;p.x+=p.vx*dt;p.y+=p.vy*dt;return}
-  const l=Math.hypot(input.x,input.y)||1,speed=235;p.vx+=(input.x/l*speed-p.vx)*Math.min(1,dt*13);p.vy+=(input.y/l*speed-p.vy)*Math.min(1,dt*13);p.x+=p.vx*dt;p.y+=p.vy*dt;
-  p.x=clamp(p.x,p.r+22,W-p.r-22);p.y=clamp(p.y,p.r+22,H-p.r-22);
-  if(input.action&&state.charge>=32){state.charge-=32;p.pulse=.35;ring(p.x,p.y,p.color,150*(state.modifier?.pulse||1));burst(p.x,p.y,p.color,22,300);state.shake=8;beep(p.id===1?420:520,.1,'sawtooth',.045);for(const e of state.enemies){if(dist(p,e)<145*(state.modifier?.pulse||1)){const d=dist(p,e)||1;e.x+=(e.x-p.x)/d*55;e.y+=(e.y-p.y)/d*55;damageEnemy(e,1,p.x,p.y)}}}
-  p.trail.push({x:p.x,y:p.y,life:.35});if(p.trail.length>16)p.trail.shift()
-}
-function damageEnemy(e,amount,x,y){if(e.dead||e.hit>0)return;e.hp-=amount;e.hit=.09;burst(e.x,e.y,e.color,7,130);if(e.hp<=0){e.dead=true;const gained=Math.round((90+e.r*3)*state.combo*(state.modifier?.score||1));state.score+=gained;state.combo=clamp(state.combo+.18,1,8);state.comboClock=2.4;state.charge=clamp(state.charge+5,0,100);floater(e.x,e.y,`+${gained}`,e.color,15);burst(e.x,e.y,e.color,18,230);beep(150+state.combo*35,.045,'square',.025)}}
-function hurtPlayer(p,e){if(p.inv>0||p.down)return;p.hp--;p.inv=1.15;state.combo=1;state.shake=15;state.flash=.16;const d=dist(p,e)||1;p.vx+=(p.x-e.x)/d*380;p.vy+=(p.y-e.y)/d*380;burst(p.x,p.y,p.color,28,290);beep(75,.18,'sawtooth',.07);if(p.hp<=0){p.down=true;p.revive=0;floater(p.x,p.y,'GEFALLEN!',p.color,24);ring(p.x,p.y,p.color,80)}}
-
-function simulate(dt,inputs){
-  state.time+=dt;state.waveTime+=dt;state.shake=Math.max(0,state.shake-dt*35);state.flash=Math.max(0,state.flash-dt);state.charge=clamp(state.charge+dt*2.3*(state.modifier?.charge||1)-dt*(state.modifier?.drain||0),0,100);
-  state.players.forEach((p,i)=>updatePlayer(p,inputs[i],dt));const [a,b]=state.players;const d=dist(a,b),max=310,pull=(state.modifier?.pull||1);
-  if(d>max){const nx=(b.x-a.x)/d,ny=(b.y-a.y)/d,force=(d-max)*4.6*pull;if(!a.down){a.x+=nx*force*dt;a.y+=ny*force*dt}if(!b.down){b.x-=nx*force*dt;b.y-=ny*force*dt}state.charge=Math.max(0,state.charge-dt*5)}
-  // Revive requires the survivor to stay close; moving away resets progress slowly.
-  for(const p of state.players.filter(p=>p.down)){const mate=state.players.find(q=>q!==p);if(!mate.down&&dist(p,mate)<92){p.revive+=dt;if(p.revive>=2.2){p.down=false;p.hp=2;p.inv=2;p.revive=0;state.score+=500;ring(p.x,p.y,p.color,180);burst(p.x,p.y,p.color,35,300);floater(p.x,p.y,'RETTUNG +500',p.color,22);beep(660,.2,'sine',.06)}}else p.revive=Math.max(0,p.revive-dt*.45)}
-  if(a.down&&b.down)return endGame();
-
-  state.spawnClock-=dt;if(state.spawnClock<=0){spawnEnemy();const base=Math.max(.2,.88-state.wave*.055);state.spawnClock=base*(state.modifier?.spawn||1)}
-  state.orbClock-=dt;if(state.orbClock<=0){spawnOrb();state.orbClock=rand(4,7)}
-  const living=state.players.filter(p=>!p.down);
-  for(const e of state.enemies){e.hit=Math.max(0,e.hit-dt);e.phase+=dt*3;const target=living.reduce((best,p)=>dist(e,p)<dist(e,best)?p:best,living[0]);if(!target)continue;let dx=target.x-e.x,dy=target.y-e.y,l=Math.hypot(dx,dy)||1,mult=(state.modifier?.speed||1)*(e.type==='dash'&&Math.sin(e.phase)>.72?2.4:1);e.x+=dx/l*e.speed*mult*dt;e.y+=dy/l*e.speed*mult*dt;
-    if(pointLineDistance(e,a,b)<e.r+5&&d>85)damageEnemy(e,dt>0?1:0,(a.x+b.x)/2,(a.y+b.y)/2);
-    for(const p of state.players)if(circleHit(e,p))hurtPlayer(p,e)
-  }
-  state.enemies=state.enemies.filter(e=>!e.dead);
-  for(const o of state.orbs){o.life-=dt;o.phase+=dt*4;for(const p of state.players)if(!p.down&&circleHit(o,p)){o.life=0;state.charge=clamp(state.charge+30,0,100);state.score+=150;floater(o.x,o.y,'ENERGIE +150','#fff',16);burst(o.x,o.y,'#fff',18,220);beep(780,.08,'sine',.035)}}state.orbs=state.orbs.filter(o=>o.life>0);
-  if(state.comboClock>0)state.comboClock-=dt;else state.combo=Math.max(1,state.combo-dt*.8);
-  if(state.waveTime>=22){state.wave++;state.waveTime=0;state.score+=1000*state.wave;applyModifier();state.enemies.forEach(e=>e.dead=true);state.players.forEach(p=>{if(!p.down)p.hp=Math.min(3,p.hp+1)});state.charge=100}
-  updateEffects(dt);updateUi()
-}
-function updateEffects(dt){for(const p of state.particles){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.96;p.vy*=.96;p.life-=dt}for(const r of state.rings){r.r+=(r.max-r.r)*dt*7;r.life-=dt*1.8}for(const f of state.floaters){f.y-=dt*28;f.life-=dt*.9}state.particles=state.particles.filter(p=>p.life>0);state.rings=state.rings.filter(r=>r.life>0);state.floaters=state.floaters.filter(f=>f.life>0)}
-function updateUi(){ui.wave.textContent=state.wave;ui.score.textContent=Math.floor(state.score).toString().padStart(6,'0');ui.combo.textContent=`×${state.combo.toFixed(1)}`}
-
-function drawGrid(){ctx.fillStyle='#070815';ctx.fillRect(0,0,W,H);ctx.strokeStyle='#191c38';ctx.lineWidth=1;const off=(state.time*12)%50;for(let x=-50+off;x<W;x+=50){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}for(let y=-50+off;y<H;y+=50){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}ctx.strokeStyle='#32375f';ctx.strokeRect(22,22,W-44,H-44)}
-function drawTether(a,b){const g=ctx.createLinearGradient(a.x,a.y,b.x,b.y);g.addColorStop(0,a.color);g.addColorStop(.5,'#fff');g.addColorStop(1,b.color);ctx.save();ctx.lineCap='round';ctx.shadowBlur=22;ctx.shadowColor='#bd83ff';ctx.strokeStyle=g;ctx.lineWidth=state.charge>15?7:3;ctx.globalAlpha=.9;ctx.beginPath();ctx.moveTo(a.x,a.y);const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,wave=Math.sin(state.time*8)*7;ctx.quadraticCurveTo(mx+wave,my-wave,b.x,b.y);ctx.stroke();ctx.globalAlpha=.26;ctx.lineWidth=18;ctx.stroke();ctx.restore()}
-function drawPlayer(p){ctx.save();ctx.translate(p.x,p.y);if(p.inv>0&&Math.floor(p.inv*10)%2===0)ctx.globalAlpha=.35;ctx.shadowBlur=25;ctx.shadowColor=p.color;ctx.strokeStyle=p.color;ctx.fillStyle='#0a0c1c';ctx.lineWidth=4;ctx.beginPath();ctx.arc(0,0,p.r,0,TAU);ctx.fill();ctx.stroke();ctx.rotate(state.time*(p.id===1?2:-2));ctx.fillStyle=p.color;for(let i=0;i<3;i++){ctx.rotate(TAU/3);ctx.fillRect(p.r+4,-3,8,6)}ctx.restore();if(p.down){ctx.strokeStyle=p.color;ctx.lineWidth=4;ctx.globalAlpha=.6;ctx.beginPath();ctx.arc(p.x,p.y,28+Math.sin(state.time*5)*4,0,TAU);ctx.stroke();if(p.revive>0){ctx.globalAlpha=1;ctx.lineWidth=6;ctx.beginPath();ctx.arc(p.x,p.y,35,-Math.PI/2,-Math.PI/2+TAU*clamp(p.revive/2.2,0,1));ctx.stroke()}ctx.globalAlpha=1}for(let i=0;i<p.hp;i++){ctx.fillStyle=p.color;ctx.fillRect(p.x-18+i*13,p.y+29,9,3)}}
-function drawEnemy(e){ctx.save();ctx.translate(e.x,e.y);ctx.rotate(e.phase);ctx.shadowBlur=15;ctx.shadowColor=e.color;ctx.fillStyle=e.hit>0?'#fff':e.color;const rr=e.r*(state.modifier?.enemySize||1);ctx.beginPath();for(let i=0;i<8;i++){const r=i%2?rr*.55:rr,a=i/8*TAU;ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r)}ctx.closePath();ctx.fill();ctx.restore()}
-function render(){ctx.save();if(state.shake)ctx.translate(rand(-state.shake,state.shake),rand(-state.shake,state.shake));drawGrid();const[a,b]=state.players;drawTether(a,b);for(const o of state.orbs){ctx.save();ctx.translate(o.x,o.y);ctx.rotate(o.phase);ctx.shadowBlur=24;ctx.shadowColor='#fff';ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.strokeRect(-8,-8,16,16);ctx.restore()}state.enemies.forEach(drawEnemy);state.players.forEach(drawPlayer);for(const r of state.rings){ctx.globalAlpha=r.life;ctx.strokeStyle=r.color;ctx.lineWidth=5*r.life;ctx.beginPath();ctx.arc(r.x,r.y,r.r,0,TAU);ctx.stroke()}for(const p of state.particles){ctx.globalAlpha=Math.max(0,p.life);ctx.fillStyle=p.color;ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size)}ctx.textAlign='center';for(const f of state.floaters){ctx.globalAlpha=Math.max(0,f.life);ctx.fillStyle=f.color;ctx.font=`700 ${f.size}px system-ui`;ctx.fillText(f.text,f.x,f.y)}ctx.globalAlpha=1;
-  // Energy bar and wave timer
-  ctx.fillStyle='#11142c';ctx.fillRect(W/2-150,H-34,300,8);const cg=ctx.createLinearGradient(W/2-150,0,W/2+150,0);cg.addColorStop(0,'#65f7ff');cg.addColorStop(1,'#ff4fb3');ctx.fillStyle=cg;ctx.fillRect(W/2-150,H-34,300*(state.charge/100),8);ctx.fillStyle='#a4a9c8';ctx.font='700 11px system-ui';ctx.fillText('GEMEINSAME IMPULS-ENERGIE',W/2,H-43);ctx.fillStyle='#32375f';ctx.fillRect(22,12,W-44,4);ctx.fillStyle='#ffe66d';ctx.fillRect(22,12,(W-44)*(state.waveTime/22),4);
-  if(state.modifier?.dark){const rg=ctx.createRadialGradient((a.x+b.x)/2,(a.y+b.y)/2,60,(a.x+b.x)/2,(a.y+b.y)/2,280);rg.addColorStop(0,'#0000');rg.addColorStop(1,'#000f');ctx.fillStyle=rg;ctx.fillRect(0,0,W,H)}if(state.flash){ctx.fillStyle=`rgba(255,255,255,${state.flash*2})`;ctx.fillRect(0,0,W,H)}ctx.restore()}
-
-function showGameOver(){
-  cancelAnimationFrame(raf);const final=Math.floor(state.score),old=Number(localStorage.tetheredChaosHigh||0),high=Math.max(old,final);localStorage.tetheredChaosHigh=high;ui.high.textContent=String(high).padStart(6,'0');ui['overlay-title'].textContent=`Welle ${state.wave}. Verbindung verloren.`;ui['overlay-text'].innerHTML=`Euer Team-Score: <strong>${String(final).padStart(6,'0')}</strong><br>${final>=old&&final>0?'NEUER REKORD — das schreit nach einem Revanche-Video.':'Noch eine Runde. Diesmal ohne Schuldzuweisungen.'}`;ui.start.textContent=mode==='lan-guest'?'SPIELER 1 STARTET':'REVANCHE STARTEN';ui.start.disabled=mode==='lan-guest'||(mode==='lan-host'&&roomPlayers<2);ui.overlay.classList.remove('hidden');ui['copy-score'].disabled=false;ui.status.textContent='VERBINDUNG VERLOREN';beep(55,.5,'sawtooth',.08)
-}
-function endGame(){state.running=false;state.gameOver=true;if(mode==='lan-host')netSend({type:'gameover',state});showGameOver()}
-function loop(now){
-  if(!state?.running)return;const dt=Math.min((now-last)/1000,.033);last=now;
-  const inputs=mode==='lan-host'?[readOwnInput(),remoteInput]:readLocalInput();if(!state.paused)simulate(dt,inputs);render();
-  if(mode==='lan-host'){remoteInput.action=false;sendClock+=dt;if(sendClock>=1/30){sendClock=0;netSend({type:'snapshot',state})}}
-  pressed.clear();raf=requestAnimationFrame(loop)
-}
-function guestLoop(now){
-  if(mode!=='lan-guest')return;const dt=Math.min((now-last)/1000,.05);last=now;if(state?.running)render();sendClock+=dt;if(sendClock>=1/30){sendClock=0;netSend({type:'input',input:readOwnInput()})}pressed.clear();raf=requestAnimationFrame(guestLoop)
-}
-
-addEventListener('keydown',e=>{if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter','Space'].includes(e.code))e.preventDefault();if(!held.has(e.code))pressed.add(e.code);held.add(e.code);if(e.code==='KeyP'&&state?.running&&(mode==='local'||mode==='lan-host')){state.paused=!state.paused;ui.pause.classList.toggle('hidden',!state.paused);last=performance.now();if(mode==='lan-host')netSend({type:'snapshot',state})}});
-addEventListener('keyup',e=>held.delete(e.code));
+addEventListener('keydown',event=>{if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Slash'].includes(event.code))event.preventDefault();if(!held.has(event.code))pressed.add(event.code);held.add(event.code);if(event.code==='KeyP'&&state?.running&&(mode==='local'||mode==='lan-host')){state.paused=!state.paused;ui.pause.classList.toggle('hidden',!state.paused);last=performance.now();if(mode==='lan-host')netSend({type:'snapshot',state})}});addEventListener('keyup',event=>held.delete(event.code));
 ui.start.addEventListener('click',handleStart);ui.lan.addEventListener('click',connectLan);ui.sound.addEventListener('click',()=>{soundOn=!soundOn;ui.sound.textContent=`TON: ${soundOn?'AN':'AUS'}`});
-ui['copy-score'].addEventListener('click',async()=>{const text=`Wir haben in Tethered Chaos Welle ${state.wave} mit ${Math.floor(state.score)} Punkten erreicht. Schafft ihr mehr? #TetheredChaos`;try{await navigator.clipboard.writeText(text);ui['copy-score'].textContent='KOPIERT!';setTimeout(()=>ui['copy-score'].textContent='ERGEBNIS KOPIEREN',1400)}catch{ui['copy-score'].textContent='NICHT MÖGLICH'}});
 
-state=freshState();state.running=false;ui.high.textContent=String(Number(localStorage.tetheredChaosHigh||0)).padStart(6,'0');render();
+state=freshState();state.running=false;updateUi();render();

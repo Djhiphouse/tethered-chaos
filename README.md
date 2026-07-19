@@ -1,65 +1,81 @@
-# Tethered Chaos
+# Chaos Couriers 3D — Tethered Chaos V2
 
-**Zwei Spieler. Eine Verbindung. Maximales Chaos.**
+**Teamwork war noch nie so nervig.**
 
-Tethered Chaos ist ein Koop-Survival-Spiel für zwei Personen – wahlweise an einer Tastatur oder über zwei Laptops im selben WLAN. Die Spieler sind durch ein gefährliches Energieband verbunden: Gegner, die das Band berühren, nehmen Schaden. Wer zu weit auseinanderläuft, wird zurückgezogen. Fällt ein Spieler, kann nur der Partner ihn retten.
+Chaos Couriers 3D ist ein chaotisches Koop-Spiel für zwei Personen – lokal an einer Tastatur oder über zwei Laptops im selben WLAN. Zwei cartoonartige Kurier-Roboter sammeln instabile Energiekerne, weichen Glitch-Gegnern und Elektroschock-Fallen aus und müssen ihre Lieferung gemeinsam ins Portal bringen.
 
-## Warum das als Creator-Spiel funktioniert
+## Das ist neu in V2
 
-- Runden sind sofort verständlich und erzeugen sichtbare Schuldzuweisungen.
-- Alle 22 Sekunden verändert eine zufällige Chaos-Karte die Regeln.
-- Rettungen, Combos, knappe Niederlagen und ein kopierbarer Team-Score liefern natürliche Clips und Challenges.
-- Kein Download, Login oder Tutorial nötig.
+- Vollständige 3D-Arena mit Three.js, dynamischer Kamera, Licht, Schatten und Nebel
+- Zwei animierte Roboter-Charaktere statt abstrakter Spielfiguren
+- Neues Missionsziel: fünf Kerne sammeln und gemeinsam abliefern
+- Glitch-Gegner, Elektrofalle, Zeitlimit, Wiederbelebung und mehrere Lieferungen
+- **Bonk:** Partner und Gegner wegstoßen
+- **Yank:** Partner zu sich ziehen – hilfreich oder maximal nervig
+- **Fluchkisten:** Wer sie einsammelt, verdreht dem Partner vier Sekunden lang die Steuerung
+- Vollständig synchronisierter LAN-Modus inklusive kurzer Aktions-Tastendrücke
 
-## Lokal spielen
+## Starten
 
-`index.html` direkt im Browser öffnen. Für einen lokalen Webserver:
-
-```bash
-python3 -m http.server 8080
-```
-
-Danach `http://localhost:8080` öffnen.
-
-### Steuerung
-
-| Spieler | Bewegung | Impuls |
-| --- | --- | --- |
-| Cyan | WASD | F |
-| Pink | Pfeiltasten | Enter |
-
-`P` pausiert das Spiel.
-
-## Über zwei Laptops im selben WLAN spielen
-
-Auf **Laptop 1** werden Node.js und dieses Repository benötigt:
+Auf dem ersten Laptop:
 
 ```bash
 npm install
 npm start
 ```
 
-Das Terminal zeigt anschließend beispielsweise:
+Das Terminal zeigt danach zwei Adressen:
 
 ```text
 Dieser Laptop: http://localhost:8081
 Freunde im WLAN: http://192.168.178.42:8081
 ```
 
+### Lokal an einer Tastatur
+
+Die `localhost`-Adresse öffnen und **„Lokal spielen“** auswählen.
+
+| Spieler | Bewegung | Bonk | Yank |
+| --- | --- | --- | --- |
+| Cyan | WASD | Q | E |
+| Pink | Pfeiltasten | `/` | rechte Umschalttaste |
+
+### Zwei Laptops im selben WLAN
+
 1. Laptop 1 öffnet die `localhost`-Adresse.
 2. Laptop 2 öffnet die angezeigte WLAN-Adresse.
-3. Auf beiden Geräten **„Über WLAN spielen“** anklicken.
-4. Laptop 1 startet die Runde, sobald Spieler 2 verbunden ist.
+3. Beide klicken **„Über WLAN spielen“**.
+4. Laptop 1 startet die Schicht, sobald Kurier 2 verbunden ist.
 
-Auf jedem Laptop funktionieren WASD oder die Pfeiltasten. Der Impuls liegt auf F, Enter oder Leertaste. Beide Geräte müssen im selben WLAN sein. Falls die Verbindung blockiert wird, Node.js in der Firewall für lokale Verbindungen freigeben.
+Auf jedem einzelnen Laptop funktionieren WASD oder die Pfeiltasten. Bonk liegt auf Q oder `/`, Yank auf E oder Shift. Falls die Verbindung blockiert wird, Node.js in der Firewall für lokale Verbindungen freigeben.
 
-## Internet-Roadmap
+## Spielziel
 
-Der LAN-Room nutzt bereits WebSockets, eine autoritative Spielinstanz und Input-Snapshots. Für echtes Spielen über das Internet fehlen noch Deployment, Room-Codes, Reconnects und Schutz gegen manipulierte Clients.
+Sammelt fünf gelbe Energiekerne. Danach müssen beide Kuriere gleichzeitig im Portal auf der rechten Seite stehen. Jede Lieferung erhöht den Score, räumt die Gegner weg und schenkt zusätzliche Zeit. Wenn beide Kuriere ausfallen oder die Zeit abläuft, endet die Schicht.
+
+## Versionen
+
+- `v2.0.0`: Chaos Couriers 3D
+- `v1.0.0`: ursprüngliches Tethered Chaos in 2D
+
+V1 kann weiterhin über den Git-Tag geladen werden:
+
+```bash
+git checkout v1.0.0
+```
+
+Zurück zur aktuellen V2:
+
+```bash
+git checkout main
+```
 
 ## Technik
 
-Vanilla HTML, CSS und JavaScript mit Canvas und Web Audio. Der LAN-Server läuft mit Node.js und der kleinen WebSocket-Bibliothek `ws`.
+- Three.js/WebGL für die 3D-Darstellung
+- Vanilla JavaScript für Simulation und Eingaben
+- Node.js und `ws` für statisches Hosting und LAN-WebSockets
+- Laptop 1 ist die autoritative Spielinstanz; Laptop 2 sendet Eingaben und erhält Zustands-Snapshots
 
 ## Lizenz
 
