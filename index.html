@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#070814">
+  <title>Tethered Chaos — Zwei Spieler. Eine Verbindung.</title>
+  <meta name="description" content="Ein chaotisches lokales Koop-Spiel für zwei Spieler an einer Tastatur.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">
+      <div><p class="eyebrow">LOCAL CO-OP · 2 SPIELER</p><h1>TETHERED <i>CHAOS</i></h1></div>
+      <button id="sound" class="icon-button" aria-label="Ton an- oder ausschalten">TON: AN</button>
+    </header>
+
+    <section class="stats" aria-label="Spielstand">
+      <span>WELLE <b id="wave">1</b></span>
+      <span>SCORE <b id="score">000000</b></span>
+      <span>COMBO <b id="combo">×1</b></span>
+      <span>REKORD <b id="high">000000</b></span>
+    </section>
+
+    <section class="stage">
+      <canvas id="game" width="1100" height="650" aria-label="Tethered Chaos Spielfeld"></canvas>
+      <div id="announcement" class="announcement hidden"><small>CHAOS-KARTE</small><strong id="announcement-title"></strong><span id="announcement-text"></span></div>
+      <div id="overlay" class="overlay">
+        <p class="kicker">ZWEI SPIELER. EINE VERBINDUNG.</p>
+        <h2 id="overlay-title">Lasst die Leine glühen.</h2>
+        <p id="overlay-text">Zerschneidet Gegner mit eurem Energieband. Bleibt zusammen, rettet euch gegenseitig – und überlebt jede neue Chaos-Karte.</p>
+        <div class="controls">
+          <div class="control cyan"><b>SPIELER 1</b><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> bewegen</span><span><kbd>F</kbd> Impuls</span></div>
+          <div class="control pink"><b>SPIELER 2</b><span><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> bewegen</span><span><kbd>↵</kbd> Impuls</span></div>
+        </div>
+        <button id="start" class="start-button">CHAOS STARTEN</button>
+        <p class="micro">P = Pause · Impuls verbraucht gemeinsame Energie · Halte dich bei einem gefallenen Partner auf, um ihn zu retten</p>
+      </div>
+      <div id="pause" class="pause hidden"><b>PAUSE</b><span>Drücke P zum Weiterspielen</span></div>
+    </section>
+
+    <footer>
+      <span id="status">BEREIT FÜR DAS CHAOS</span>
+      <button id="copy-score" class="share" disabled>ERGEBNIS KOPIEREN</button>
+    </footer>
+  </main>
+  <script src="game.js"></script>
+</body>
+</html>
