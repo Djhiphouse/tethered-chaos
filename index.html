@@ -33,14 +33,17 @@
           <div class="control cyan"><b>SPIELER 1</b><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> bewegen</span><span><kbd>F</kbd> Impuls</span></div>
           <div class="control pink"><b>SPIELER 2</b><span><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> bewegen</span><span><kbd>↵</kbd> Impuls</span></div>
         </div>
-        <button id="start" class="start-button">CHAOS STARTEN</button>
+        <div class="mode-buttons">
+          <button id="start" class="start-button">LOKAL SPIELEN</button>
+          <button id="lan" class="start-button secondary">ÜBER WLAN SPIELEN</button>
+        </div>
         <p class="micro">P = Pause · Impuls verbraucht gemeinsame Energie · Halte dich bei einem gefallenen Partner auf, um ihn zu retten</p>
       </div>
       <div id="pause" class="pause hidden"><b>PAUSE</b><span>Drücke P zum Weiterspielen</span></div>
     </section>
 
     <footer>
-      <span id="status">BEREIT FÜR DAS CHAOS</span>
+      <span id="status">BEREIT FÜR DAS CHAOS</span><span id="network" class="network hidden">● LAN</span>
       <button id="copy-score" class="share" disabled>ERGEBNIS KOPIEREN</button>
     </footer>
   </main>

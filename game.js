@@ -4,12 +4,14 @@
 
 const canvas = document.querySelector('#game');
 const ctx = canvas.getContext('2d');
-const ui = Object.fromEntries(['wave','score','combo','high','status','overlay','overlay-title','overlay-text','start','pause','announcement','announcement-title','announcement-text','copy-score','sound'].map(id=>[id,document.getElementById(id)]));
+const ui = Object.fromEntries(['wave','score','combo','high','status','overlay','overlay-title','overlay-text','start','lan','network','pause','announcement','announcement-title','announcement-text','copy-score','sound'].map(id=>[id,document.getElementById(id)]));
 const W=canvas.width,H=canvas.height,TAU=Math.PI*2;
 const held=new Set(),pressed=new Set();
 const rand=(a,b)=>a+Math.random()*(b-a),clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 let state,raf,last=0,soundOn=true,audio;
+let mode='menu',socket=null,lanSlot=0,roomPlayers=0,sendClock=0,guestWave=1,intentionalClose=false;
+let remoteInput={x:0,y:0,action:false};
 
 const MODIFIERS=[
   {name:'TURBO-SCHWARM',text:'Mehr Gegner. Mehr Punkte. Weniger Ausreden.',spawn:.58,speed:1.12,score:1.35},
@@ -28,6 +30,7 @@ function freshState(){return{
 }}
 
 function readLocalInput(){return state.players.map(p=>({x:(held.has(p.keys.right)?1:0)-(held.has(p.keys.left)?1:0),y:(held.has(p.keys.down)?1:0)-(held.has(p.keys.up)?1:0),action:pressed.has(p.keys.action)}))}
+function readOwnInput(){return{x:(held.has('KeyD')||held.has('ArrowRight')?1:0)-(held.has('KeyA')||held.has('ArrowLeft')?1:0),y:(held.has('KeyS')||held.has('ArrowDown')?1:0)-(held.has('KeyW')||held.has('ArrowUp')?1:0),action:pressed.has('KeyF')||pressed.has('Enter')||pressed.has('Space')}}
 function beep(freq=220,duration=.06,type='sine',volume=.04){if(!soundOn)return;audio ||= new AudioContext();const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.value=freq;g.gain.setValueAtTime(volume,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+duration);o.connect(g).connect(audio.destination);o.start();o.stop(audio.currentTime+duration)}
 function burst(x,y,color,count=16,power=230){for(let i=0;i<count;i++){const a=rand(0,TAU),s=rand(30,power);state.particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:rand(.3,.9),max:1,size:rand(2,7),color})}}
 function ring(x,y,color,max=130){state.rings.push({x,y,r:8,max,life:1,color})}
@@ -35,7 +38,42 @@ function floater(x,y,text,color='#fff',size=18){state.floaters.push({x,y,text,co
 function circleHit(a,b){return dist(a,b)<a.r+b.r}
 function pointLineDistance(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy;if(!l2)return dist(p,a);const t=clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/l2,0,1);return Math.hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy))}
 
-function start(){cancelAnimationFrame(raf);state=freshState();ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui['copy-score'].disabled=true;ui.status.textContent='DIE VERBINDUNG HÄLT';last=performance.now();beep(180,.12,'sawtooth',.06);raf=requestAnimationFrame(loop)}
+function beginRound(){cancelAnimationFrame(raf);state=freshState();sendClock=0;remoteInput={x:0,y:0,action:false};ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui['copy-score'].disabled=true;ui.status.textContent=mode==='local'?'DIE VERBINDUNG HÄLT':`LAN · SPIELER ${lanSlot}`;last=performance.now();beep(180,.12,'sawtooth',.06);raf=requestAnimationFrame(loop)}
+function startLocal(){disconnectLan(true);mode='local';ui.network.classList.add('hidden');ui.lan.disabled=false;ui.lan.textContent='ÜBER WLAN SPIELEN';beginRound()}
+function beginGuestRound(){cancelAnimationFrame(raf);state=freshState();state.running=true;guestWave=1;sendClock=0;ui.overlay.classList.add('hidden');ui.pause.classList.add('hidden');ui['copy-score'].disabled=true;ui.status.textContent='LAN · SPIELER 2';last=performance.now();raf=requestAnimationFrame(guestLoop)}
+
+function netSend(message){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message))}
+function setLanMessage(title,text){ui['overlay-title'].textContent=title;ui['overlay-text'].innerHTML=text;ui.overlay.classList.remove('hidden')}
+function updateRoom(){
+  if(mode==='lan-host'&&!state?.running&&!state?.gameOver){const ready=roomPlayers===2;setLanMessage(ready?'Spieler 2 ist verbunden.':'Warte auf Spieler 2 …',ready?'Ihr seid im selben Raum. Starte, wenn ihr beide bereit seid.':'Dein Freund öffnet dieselbe WLAN-Adresse, die im Terminal angezeigt wird.');ui.start.textContent=ready?'LAN-RUNDE STARTEN':'WARTE AUF FREUND';ui.start.disabled=!ready}
+  if(mode==='lan-guest'&&!state?.running&&!state?.gameOver){setLanMessage('Verbunden als Spieler 2.','Spieler 1 startet die Runde. Auf deinem Laptop funktionieren WASD oder die Pfeiltasten; Impuls mit F, Enter oder Leertaste.');ui.start.textContent='SPIELER 1 STARTET';ui.start.disabled=true}
+}
+function connectLan(){
+  if(location.protocol==='file:'){setLanMessage('LAN braucht den Spielserver.','Starte im Projektordner <strong>npm install</strong> und danach <strong>npm start</strong>. Öffne anschließend die angezeigte WLAN-Adresse.');return}
+  if(socket&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(socket.readyState))return;
+  intentionalClose=false;mode='lan-connecting';ui.start.disabled=true;ui.lan.disabled=true;ui.lan.textContent='VERBINDE …';setLanMessage('LAN-Verbindung wird aufgebaut …','Der erste verbundene Laptop wird Spieler 1, der zweite wird Spieler 2.');
+  const protocol=location.protocol==='https:'?'wss:':'ws:';socket=new WebSocket(`${protocol}//${location.host}`);
+  socket.addEventListener('message',event=>{
+    let message;try{message=JSON.parse(event.data)}catch{return}
+    if(message.type==='assign'){
+      lanSlot=message.slot;ui.network.classList.remove('hidden','bad');ui.network.textContent=lanSlot?`● LAN · P${lanSlot}`:'● ZUSCHAUER';ui.lan.textContent='LAN VERBUNDEN';
+      if(lanSlot===1)mode='lan-host';else if(lanSlot===2)mode='lan-guest';else{mode='lan-spectator';setLanMessage('Dieser Raum ist voll.','Zwei Spieler sind bereits verbunden. Schließe einen der anderen Tabs und lade diese Seite neu.')}updateRoom()
+    }
+    if(message.type==='room'){roomPlayers=message.players;updateRoom()}
+    if(message.type==='input'&&mode==='lan-host'){const i=message.input||{};remoteInput={x:Math.max(-1,Math.min(1,Number(i.x)||0)),y:Math.max(-1,Math.min(1,Number(i.y)||0)),action:Boolean(i.action)}}
+    if(message.type==='start'){if(mode==='lan-host')beginRound();if(mode==='lan-guest')beginGuestRound()}
+    if(message.type==='snapshot'&&mode==='lan-guest'){
+      state=message.state;if(state.wave>guestWave&&state.modifier){guestWave=state.wave;ui['announcement-title'].textContent=state.modifier.name;ui['announcement-text'].textContent=state.modifier.text;ui.announcement.classList.remove('hidden');ui.announcement.style.animation='none';void ui.announcement.offsetWidth;ui.announcement.style.animation='cardIn 2.8s both'}
+      ui.pause.classList.toggle('hidden',!state.paused);updateUi()
+    }
+    if(message.type==='gameover'&&mode==='lan-guest'){state=message.state;showGameOver()}
+    if(message.type==='host-left'&&mode==='lan-guest'){cancelAnimationFrame(raf);state.running=false;setLanMessage('Spieler 1 hat den Raum verlassen.','Lade beide Seiten neu, um einen neuen LAN-Raum zu starten.');ui.start.disabled=true;ui.network.classList.add('bad')}
+  });
+  socket.addEventListener('close',()=>{if(intentionalClose)return;cancelAnimationFrame(raf);ui.network.classList.remove('hidden');ui.network.classList.add('bad');ui.network.textContent='● LAN GETRENNT';setLanMessage('LAN-Verbindung getrennt.','Prüfe, ob der Server auf Laptop 1 noch läuft, und lade die Seite neu.');ui.start.disabled=true});
+  socket.addEventListener('error',()=>{ui.network.classList.remove('hidden');ui.network.classList.add('bad');ui.network.textContent='● LAN-FEHLER'});
+}
+function disconnectLan(silent=false){if(socket){intentionalClose=silent;socket.close();socket=null}lanSlot=0;roomPlayers=0}
+function handleStart(){if(mode==='lan-host'){if(roomPlayers===2)netSend({type:'start'});return}if(mode==='lan-guest'||mode==='lan-connecting'||mode==='lan-spectator')return;startLocal()}
 function spawnEnemy(){const edge=Math.floor(rand(0,4)),m=35;let x=edge===1?W+m:edge===3?-m:rand(0,W),y=edge===0?-m:edge===2?H+m:rand(0,H);const roll=Math.random();state.enemies.push({x,y,r:roll>.87?25:roll>.62?18:13,hp:roll>.87?3:roll>.62?2:1,speed:rand(72,118),type:roll>.87?'tank':roll>.62?'dash':'basic',color:roll>.87?'#ffe66d':'#ff446d',hit:0,phase:rand(0,TAU),dead:false})}
 function spawnOrb(){state.orbs.push({x:rand(70,W-70),y:rand(70,H-70),r:10,life:10,phase:rand(0,TAU)})}
 function applyModifier(){let next=Math.floor(Math.random()*MODIFIERS.length);if(next===state.lastModifier)next=(next+1)%MODIFIERS.length;state.lastModifier=next;state.modifier={...MODIFIERS[next]};ui['announcement-title'].textContent=state.modifier.name;ui['announcement-text'].textContent=state.modifier.text;ui.announcement.classList.remove('hidden');void ui.announcement.offsetWidth;ui.announcement.style.animation='none';void ui.announcement.offsetWidth;ui.announcement.style.animation='cardIn 2.8s both';beep(110,.25,'square',.05)}
@@ -84,12 +122,23 @@ function render(){ctx.save();if(state.shake)ctx.translate(rand(-state.shake,stat
   ctx.fillStyle='#11142c';ctx.fillRect(W/2-150,H-34,300,8);const cg=ctx.createLinearGradient(W/2-150,0,W/2+150,0);cg.addColorStop(0,'#65f7ff');cg.addColorStop(1,'#ff4fb3');ctx.fillStyle=cg;ctx.fillRect(W/2-150,H-34,300*(state.charge/100),8);ctx.fillStyle='#a4a9c8';ctx.font='700 11px system-ui';ctx.fillText('GEMEINSAME IMPULS-ENERGIE',W/2,H-43);ctx.fillStyle='#32375f';ctx.fillRect(22,12,W-44,4);ctx.fillStyle='#ffe66d';ctx.fillRect(22,12,(W-44)*(state.waveTime/22),4);
   if(state.modifier?.dark){const rg=ctx.createRadialGradient((a.x+b.x)/2,(a.y+b.y)/2,60,(a.x+b.x)/2,(a.y+b.y)/2,280);rg.addColorStop(0,'#0000');rg.addColorStop(1,'#000f');ctx.fillStyle=rg;ctx.fillRect(0,0,W,H)}if(state.flash){ctx.fillStyle=`rgba(255,255,255,${state.flash*2})`;ctx.fillRect(0,0,W,H)}ctx.restore()}
 
-function endGame(){state.running=false;state.gameOver=true;cancelAnimationFrame(raf);const final=Math.floor(state.score),old=Number(localStorage.tetheredChaosHigh||0),high=Math.max(old,final);localStorage.tetheredChaosHigh=high;ui.high.textContent=String(high).padStart(6,'0');ui['overlay-title'].textContent=`Welle ${state.wave}. Verbindung verloren.`;ui['overlay-text'].innerHTML=`Euer Team-Score: <strong>${String(final).padStart(6,'0')}</strong><br>${final>=old&&final>0?'NEUER REKORD — das schreit nach einem Revanche-Video.':'Noch eine Runde. Diesmal ohne Schuldzuweisungen.'}`;ui.start.textContent='REVANCHE STARTEN';ui.overlay.classList.remove('hidden');ui['copy-score'].disabled=false;ui.status.textContent='VERBINDUNG VERLOREN';beep(55,.5,'sawtooth',.08)}
-function loop(now){if(!state?.running)return;const dt=Math.min((now-last)/1000,.033);last=now;if(!state.paused)simulate(dt,readLocalInput());render();pressed.clear();raf=requestAnimationFrame(loop)}
+function showGameOver(){
+  cancelAnimationFrame(raf);const final=Math.floor(state.score),old=Number(localStorage.tetheredChaosHigh||0),high=Math.max(old,final);localStorage.tetheredChaosHigh=high;ui.high.textContent=String(high).padStart(6,'0');ui['overlay-title'].textContent=`Welle ${state.wave}. Verbindung verloren.`;ui['overlay-text'].innerHTML=`Euer Team-Score: <strong>${String(final).padStart(6,'0')}</strong><br>${final>=old&&final>0?'NEUER REKORD — das schreit nach einem Revanche-Video.':'Noch eine Runde. Diesmal ohne Schuldzuweisungen.'}`;ui.start.textContent=mode==='lan-guest'?'SPIELER 1 STARTET':'REVANCHE STARTEN';ui.start.disabled=mode==='lan-guest'||(mode==='lan-host'&&roomPlayers<2);ui.overlay.classList.remove('hidden');ui['copy-score'].disabled=false;ui.status.textContent='VERBINDUNG VERLOREN';beep(55,.5,'sawtooth',.08)
+}
+function endGame(){state.running=false;state.gameOver=true;if(mode==='lan-host')netSend({type:'gameover',state});showGameOver()}
+function loop(now){
+  if(!state?.running)return;const dt=Math.min((now-last)/1000,.033);last=now;
+  const inputs=mode==='lan-host'?[readOwnInput(),remoteInput]:readLocalInput();if(!state.paused)simulate(dt,inputs);render();
+  if(mode==='lan-host'){remoteInput.action=false;sendClock+=dt;if(sendClock>=1/30){sendClock=0;netSend({type:'snapshot',state})}}
+  pressed.clear();raf=requestAnimationFrame(loop)
+}
+function guestLoop(now){
+  if(mode!=='lan-guest')return;const dt=Math.min((now-last)/1000,.05);last=now;if(state?.running)render();sendClock+=dt;if(sendClock>=1/30){sendClock=0;netSend({type:'input',input:readOwnInput()})}pressed.clear();raf=requestAnimationFrame(guestLoop)
+}
 
-addEventListener('keydown',e=>{if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter','Space'].includes(e.code))e.preventDefault();if(!held.has(e.code))pressed.add(e.code);held.add(e.code);if(e.code==='KeyP'&&state?.running){state.paused=!state.paused;ui.pause.classList.toggle('hidden',!state.paused);last=performance.now()}});
+addEventListener('keydown',e=>{if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter','Space'].includes(e.code))e.preventDefault();if(!held.has(e.code))pressed.add(e.code);held.add(e.code);if(e.code==='KeyP'&&state?.running&&(mode==='local'||mode==='lan-host')){state.paused=!state.paused;ui.pause.classList.toggle('hidden',!state.paused);last=performance.now();if(mode==='lan-host')netSend({type:'snapshot',state})}});
 addEventListener('keyup',e=>held.delete(e.code));
-ui.start.addEventListener('click',start);ui.sound.addEventListener('click',()=>{soundOn=!soundOn;ui.sound.textContent=`TON: ${soundOn?'AN':'AUS'}`});
+ui.start.addEventListener('click',handleStart);ui.lan.addEventListener('click',connectLan);ui.sound.addEventListener('click',()=>{soundOn=!soundOn;ui.sound.textContent=`TON: ${soundOn?'AN':'AUS'}`});
 ui['copy-score'].addEventListener('click',async()=>{const text=`Wir haben in Tethered Chaos Welle ${state.wave} mit ${Math.floor(state.score)} Punkten erreicht. Schafft ihr mehr? #TetheredChaos`;try{await navigator.clipboard.writeText(text);ui['copy-score'].textContent='KOPIERT!';setTimeout(()=>ui['copy-score'].textContent='ERGEBNIS KOPIEREN',1400)}catch{ui['copy-score'].textContent='NICHT MÖGLICH'}});
 
 state=freshState();state.running=false;ui.high.textContent=String(Number(localStorage.tetheredChaosHigh||0)).padStart(6,'0');render();

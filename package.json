@@ -1,0 +1,13 @@
+{
+  "name": "tethered-chaos",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local and LAN co-op survival game for two players",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check game.js && node --check server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
