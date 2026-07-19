@@ -42,8 +42,8 @@ npm start
 Das Terminal zeigt anschließend beispielsweise:
 
 ```text
-Dieser Laptop: http://localhost:8080
-Freunde im WLAN: http://192.168.178.42:8080
+Dieser Laptop: http://localhost:8081
+Freunde im WLAN: http://192.168.178.42:8081
 ```
 
 1. Laptop 1 öffnet die `localhost`-Adresse.
